@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>StreamPay</title>
+    <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+
+    <div class="container">
+
+        <header>
+            <div>
+                <h1>StreamPay</h1>
+                <p>Corporate Micro-Salary & Vesting Protocol</p>
+            </div>
+
+            <button id="connectWalletBtn">
+                Connect MetaMask
+            </button>
+        </header>
+
+        <section class="card status-card">
+            <h2>Wallet & Network</h2>
+
+            <p>
+                <strong>Wallet:</strong>
+                <span id="walletAddress">Not connected</span>
+            </p>
+
+            <p>
+                <strong>Network:</strong>
+                <span id="networkStatus">Not detected</span>
+            </p>
+
+            <p>
+                <strong>Role:</strong>
+                <span id="roleText">Unknown</span>
+            </p>
+        </section>
+
+        <section id="adminSection" class="card hidden">
+            <h2>Admin Panel</h2>
+
+            <p>
+                <strong>Admin Fee Balance:</strong>
+                <span id="adminFeeBalance">0 ETH</span>
+            </p>
+
+            <button id="claimAdminFeesBtn">
+                Claim Admin Fees
+            </button>
+        </section>
+
+        <section id="employerSection" class="card hidden">
+            <h2>Employer Panel</h2>
+
+            <div class="form-group">
+                <label>Company ID</label>
+                <input
+                    type="number"
+                    id="companyIdInput"
+                    placeholder="Example: 101"
+                />
+            </div>
+
+            <button id="registerCompanyBtn">
+                Register Company
+            </button>
+
+            <hr />
+
+            <div class="form-group">
+                <label>Employee Address</label>
+                <input
+                    type="text"
+                    id="employeeAddressInput"
+                    placeholder="0x..."
+                />
+            </div>
+
+            <button id="registerEmployeeBtn">
+                Register Employee
+            </button>
+
+            <hr />
+
+            <h3>Create Salary Stream</h3>
+
+            <div class="form-group">
+                <label>Company ID</label>
+                <input
+                    type="number"
+                    id="streamCompanyIdInput"
+                    placeholder="101"
+                />
+            </div>
+
+            <div class="form-group">
+                <label>Employee Address</label>
+                <input
+                    type="text"
+                    id="streamEmployeeInput"
+                    placeholder="0x..."
+                />
+            </div>
+
+            <div class="form-group">
+                <label>Duration (seconds)</label>
+                <input
+                    type="number"
+                    id="durationInput"
+                    placeholder="Example: 120"
+                />
+            </div>
+
+            <div class="form-group">
+                <label>Deposit (ETH)</label>
+                <input
+                    type="text"
+                    id="depositInput"
+                    placeholder="Example: 1"
+                />
+            </div>
+
+            <button id="createStreamBtn">
+                Create Stream
+            </button>
+
+            <hr />
+
+            <h3>Outgoing Streams</h3>
+
+            <div id="employerStreams">
+                No streams loaded.
+            </div>
+        </section>
+
+        <section id="employeeSection" class="card hidden">
+            <h2>Employee Panel</h2>
+
+            <h3>Incoming Streams</h3>
+
+            <div id="employeeStreams">
+                No streams loaded.
+            </div>
+        </section>
+
+        <section class="card">
+            <h2>System Status</h2>
+            <p id="statusMessage">
+                Waiting for wallet connection...
+            </p>
+        </section>
+
+    </div>
+
+    <script type="module" src="./app.js"></script>
+</body>
+</html>
