@@ -1,5 +1,9 @@
 import { ethers } from "ethers";
 
+// =====================================================
+// CONTRACT CONFIGURATION
+// =====================================================
+
 const CONTRACT_ADDRESS =
     "0x5FbDB2315678afecb367f032d93F642f64180aa3";
 
@@ -7,96 +11,291 @@ const ABI = [
     "function admin() view returns (address)",
     "function adminFees() view returns (uint256)",
     "function nextStreamId() view returns (uint256)",
-
     "function companyOwners(uint256) view returns (address)",
     "function companyEmployees(uint256,address) view returns (bool)",
-
-    "function registerCompany(uint256)",
-    "function registerEmployee(uint256,address)",
-
-    "function createStream(uint256,address,uint256) payable returns (uint256)",
-
+    "function streams(uint256) view returns (uint256 id,uint256 companyId,address employer,address employee,uint256 totalDeposit,uint256 startTime,uint256 duration,uint256 totalWithdrawn,bool active)",
     "function getUnlockedAmount(uint256) view returns (uint256)",
     "function getClaimableAmount(uint256) view returns (uint256)",
 
+    "function registerCompany(uint256)",
+    "function registerEmployee(uint256,address)",
+    "function createStream(uint256,address,uint256) payable returns (uint256)",
     "function withdraw(uint256)",
     "function cancelStream(uint256)",
     "function claimAdminFees()",
 
-    "function streams(uint256) view returns (uint256 id,uint256 companyId,address employer,address employee,uint256 totalDeposit,uint256 startTime,uint256 duration,uint256 totalWithdrawn,bool active)"
+    "event StreamCreated(uint256 indexed streamId,uint256 indexed companyId,address indexed employer,address employee,uint256 amount,uint256 duration)",
+    "event Withdrawn(uint256 indexed streamId,address indexed employee,uint256 grossAmount,uint256 fee,uint256 employeeAmount)",
+    "event StreamCancelled(uint256 indexed streamId,uint256 employeeVestedAmount,uint256 employerRefund)",
+    "event AdminFeesClaimed(address indexed admin,uint256 amount)"
 ];
 
-let provider;
-let signer;
-let contract;
+
+// =====================================================
+// METAMASK PROVIDER SELECTION
+// =====================================================
+
+// =====================================================
+// EIP-6963 METAMASK PROVIDER DISCOVERY
+// =====================================================
+
+let ethereum = null;
+
+function discoverMetaMaskProvider() {
+
+    return new Promise((resolve) => {
+
+        let found = false;
+
+        const handler = (event) => {
+
+            const detail =
+                event.detail;
+
+            if (!detail) {
+                return;
+            }
+
+            const info =
+                detail.info;
+
+            const walletProvider =
+                detail.provider;
+
+            // Specifically select MetaMask
+            if (
+                info?.name === "MetaMask" ||
+                info?.rdns === "io.metamask"
+            ) {
+
+                if (found) {
+                    return;
+                }
+
+                found = true;
+
+                window.removeEventListener(
+                    "eip6963:announceProvider",
+                    handler
+                );
+
+                resolve(
+                    walletProvider
+                );
+            }
+        };
+
+        window.addEventListener(
+            "eip6963:announceProvider",
+            handler
+        );
+
+        // Ask installed wallets
+        // to announce themselves
+        window.dispatchEvent(
+            new Event(
+                "eip6963:requestProvider"
+            )
+        );
+
+        // Fallback
+        setTimeout(() => {
+
+            if (!found) {
+
+                window.removeEventListener(
+                    "eip6963:announceProvider",
+                    handler
+                );
+
+                if (
+                    window.ethereum &&
+                    window.ethereum.isMetaMask
+                ) {
+
+                    resolve(
+                        window.ethereum
+                    );
+
+                } else {
+
+                    resolve(null);
+                }
+            }
+
+        }, 1500);
+    });
+}
+
+
+// =====================================================
+// GLOBAL VARIABLES
+// =====================================================
+
+let provider = null;
+
+let signer = null;
+
+let contract = null;
+
 let currentAccount = null;
 
 let tickerInterval = null;
 
+let eventContract = null;
+
+
+// Local copy of blockchain stream state.
+// The 1-second ticker uses this cache,
+// not RPC calls every second.
+let streamCache =
+    new Map();
+
+
+// =====================================================
+// HTML ELEMENTS
+// =====================================================
+
 const connectWalletBtn =
-    document.getElementById("connectWalletBtn");
+    document.getElementById(
+        "connectWalletBtn"
+    );
 
 const walletAddress =
-    document.getElementById("walletAddress");
+    document.getElementById(
+        "walletAddress"
+    );
 
 const networkStatus =
-    document.getElementById("networkStatus");
+    document.getElementById(
+        "networkStatus"
+    );
 
 const roleText =
-    document.getElementById("roleText");
+    document.getElementById(
+        "roleText"
+    );
 
 const adminSection =
-    document.getElementById("adminSection");
+    document.getElementById(
+        "adminSection"
+    );
 
 const employerSection =
-    document.getElementById("employerSection");
+    document.getElementById(
+        "employerSection"
+    );
 
 const employeeSection =
-    document.getElementById("employeeSection");
+    document.getElementById(
+        "employeeSection"
+    );
 
 const adminFeeBalance =
-    document.getElementById("adminFeeBalance");
+    document.getElementById(
+        "adminFeeBalance"
+    );
 
 const statusMessage =
-    document.getElementById("statusMessage");
+    document.getElementById(
+        "statusMessage"
+    );
 
 const employerStreams =
-    document.getElementById("employerStreams");
+    document.getElementById(
+        "employerStreams"
+    );
 
 const employeeStreams =
-    document.getElementById("employeeStreams");
+    document.getElementById(
+        "employeeStreams"
+    );
+
+
+// =====================================================
+// HELPERS
+// =====================================================
 
 function setStatus(message) {
-    statusMessage.textContent = message;
+
+    statusMessage.textContent =
+        message;
 }
+
 
 function shortAddress(address) {
-    if (!address) return "";
-    return `${address.slice(0, 6)}...${address.slice(-4)}`;
+
+    if (!address) {
+        return "";
+    }
+
+    return (
+        address.slice(0, 6) +
+        "..." +
+        address.slice(-4)
+    );
 }
 
-async function connectWallet() {
 
-    if (!window.ethereum) {
-        alert("MetaMask is not installed.");
+// =====================================================
+// CONNECT METAMASK
+// =====================================================
+
+async function connectWallet(
+    requestPermission = true
+) {
+
+    if (!ethereum) {
+
+        setStatus(
+            "MetaMask not detected."
+        );
+
+        alert(
+            "MetaMask is not installed or could not be detected."
+        );
+
         return;
     }
 
+
     try {
-        provider =
-            new ethers.BrowserProvider(window.ethereum);
 
-        await provider.send(
-            "eth_requestAccounts",
-            []
-        );
+        // Ask MetaMask for permission
+        // only when user clicks Connect.
+        if (requestPermission) {
 
-        const network =
-            await provider.getNetwork();
+            await ethereum.request({
+                method:
+                    "eth_requestAccounts"
+            });
+        }
 
-        if (network.chainId !== 31337n) {
+
+        // -----------------------------
+        // CHECK CHAIN DIRECTLY
+        // -----------------------------
+
+        const chainIdHex =
+            await ethereum.request({
+                method: "eth_chainId"
+            });
+
+
+        const chainId =
+            BigInt(chainIdHex);
+
+
+        if (chainId !== 31337n) {
+
             networkStatus.textContent =
-                `Wrong Network - Chain ID ${network.chainId}`;
+                `Wrong Network - Chain ID ${chainId}`;
+
+            walletAddress.textContent =
+                "Not connected";
+
+            roleText.textContent =
+                "Unknown";
 
             setStatus(
                 "Please switch MetaMask to Anvil Local."
@@ -105,17 +304,41 @@ async function connectWallet() {
             return;
         }
 
+
         networkStatus.textContent =
             "Anvil Local - Chain ID 31337";
+
+
+        // -----------------------------
+        // ETHERS PROVIDER
+        // -----------------------------
+
+        provider =
+            new ethers.BrowserProvider(
+                ethereum,
+                "any"
+            );
+
+
+        provider.pollingInterval =
+            1000;
+
 
         signer =
             await provider.getSigner();
 
+
         currentAccount =
             await signer.getAddress();
 
+
         walletAddress.textContent =
             currentAccount;
+
+
+        // -----------------------------
+        // CONTRACT
+        // -----------------------------
 
         contract =
             new ethers.Contract(
@@ -124,106 +347,253 @@ async function connectWallet() {
                 signer
             );
 
+
         connectWalletBtn.textContent =
             "Wallet Connected";
+
 
         setStatus(
             "Wallet connected successfully."
         );
 
-        await detectRole();
+
+        // Load blockchain state once
         await loadStreams();
+
+        await detectRole();
 
         startTicker();
 
+        await startEventListeners();
+
+
     } catch (error) {
-        console.error(error);
-        setStatus(error.message);
+
+        console.error(
+            "Wallet connection error:",
+            error
+        );
+
+        setStatus(
+            error.shortMessage ||
+            error.message ||
+            "Wallet connection failed."
+        );
     }
 }
 
+
+// =====================================================
+// AUTO CONNECT
+// =====================================================
+
+async function autoConnectWallet() {
+
+    if (!ethereum) {
+
+        setStatus(
+            "MetaMask not detected."
+        );
+
+        return;
+    }
+
+
+    try {
+
+        const accounts =
+            await ethereum.request({
+                method: "eth_accounts"
+            });
+
+
+        if (accounts.length > 0) {
+
+            await connectWallet(false);
+
+        } else {
+
+            setStatus(
+                "MetaMask detected. Click Connect MetaMask."
+            );
+        }
+
+
+    } catch (error) {
+
+        console.error(
+            "Auto-connect error:",
+            error
+        );
+
+        setStatus(
+            "MetaMask detected. Click Connect MetaMask."
+        );
+    }
+}
+
+
+// =====================================================
+// ROLE DETECTION
+// =====================================================
+
 async function detectRole() {
 
-    adminSection.classList.add("hidden");
-    employerSection.classList.add("hidden");
-    employeeSection.classList.add("hidden");
+    if (
+        !contract ||
+        !currentAccount
+    ) {
+
+        return;
+    }
+
+
+    adminSection.classList.add(
+        "hidden"
+    );
+
+    employerSection.classList.add(
+        "hidden"
+    );
+
+    employeeSection.classList.add(
+        "hidden"
+    );
+
 
     const adminAddress =
         await contract.admin();
 
+
+    const current =
+        currentAccount
+            .toLowerCase();
+
+
     let roles = [];
 
+
+    // Admin / Employer
     if (
-        currentAccount.toLowerCase() ===
+        current ===
         adminAddress.toLowerCase()
     ) {
+
         roles.push("Admin");
-        adminSection.classList.remove("hidden");
-        employerSection.classList.remove("hidden");
+
+        roles.push("Employer");
+
+        adminSection
+            .classList
+            .remove("hidden");
+
+        employerSection
+            .classList
+            .remove("hidden");
+
+        await updateAdminFees();
     }
 
-    const nextId =
-        Number(await contract.nextStreamId());
 
     let isEmployer = false;
+
     let isEmployee = false;
 
-    for (let i = 0; i < nextId; i++) {
 
-        const stream =
-            await contract.streams(i);
+    for (
+        const stream
+        of streamCache.values()
+    ) {
 
         if (
-            stream.employer.toLowerCase() ===
-            currentAccount.toLowerCase()
+            stream.employer
+                .toLowerCase() ===
+            current
         ) {
+
             isEmployer = true;
         }
 
+
         if (
-            stream.employee.toLowerCase() ===
-            currentAccount.toLowerCase()
+            stream.employee
+                .toLowerCase() ===
+            current
         ) {
+
             isEmployee = true;
         }
     }
 
-    if (isEmployer) {
+
+    if (
+        isEmployer &&
+        !roles.includes(
+            "Employer"
+        )
+    ) {
+
         roles.push("Employer");
-        employerSection.classList.remove("hidden");
+
+        employerSection
+            .classList
+            .remove("hidden");
     }
+
 
     if (isEmployee) {
+
         roles.push("Employee");
-        employeeSection.classList.remove("hidden");
+
+        employeeSection
+            .classList
+            .remove("hidden");
     }
 
+
     if (roles.length === 0) {
-        roles.push("Unassigned");
+
+        roles.push(
+            "Unassigned"
+        );
     }
+
 
     roleText.textContent =
         roles.join(" / ");
-
-    if (
-        currentAccount.toLowerCase() ===
-        adminAddress.toLowerCase()
-    ) {
-        await updateAdminFees();
-    }
 }
 
+
+// =====================================================
+// ADMIN FEE BALANCE
+// =====================================================
+
 async function updateAdminFees() {
+
+    if (!contract) {
+        return;
+    }
+
 
     const fees =
         await contract.adminFees();
 
+
     adminFeeBalance.textContent =
-        `${ethers.formatEther(fees)} ETH`;
+        `${ethers.formatEther(
+            fees
+        )} ETH`;
 }
 
+
+// =====================================================
+// REGISTER COMPANY
+// =====================================================
+
 document
-    .getElementById("registerCompanyBtn")
+    .getElementById(
+        "registerCompanyBtn"
+    )
     .addEventListener(
         "click",
         async () => {
@@ -235,29 +605,43 @@ document
                     )
                     .value;
 
+
             if (!companyId) {
-                alert("Enter Company ID");
+
+                alert(
+                    "Enter Company ID"
+                );
+
                 return;
             }
 
+
             try {
+
                 setStatus(
                     "Registering company..."
                 );
 
+
                 const tx =
-                    await contract.registerCompany(
-                        companyId
-                    );
+                    await contract
+                        .registerCompany(
+                            companyId
+                        );
+
 
                 await tx.wait();
+
 
                 setStatus(
                     "Company registered successfully."
                 );
 
+
             } catch (error) {
+
                 console.error(error);
+
                 setStatus(
                     error.shortMessage ||
                     error.message
@@ -266,8 +650,15 @@ document
         }
     );
 
+
+// =====================================================
+// REGISTER EMPLOYEE
+// =====================================================
+
 document
-    .getElementById("registerEmployeeBtn")
+    .getElementById(
+        "registerEmployeeBtn"
+    )
     .addEventListener(
         "click",
         async () => {
@@ -278,6 +669,7 @@ document
                         "companyIdInput"
                     )
                     .value;
+
 
             const employeeAddress =
                 document
@@ -286,15 +678,19 @@ document
                     )
                     .value;
 
+
             if (
                 !companyId ||
                 !employeeAddress
             ) {
+
                 alert(
                     "Enter company ID and employee address"
                 );
+
                 return;
             }
+
 
             try {
 
@@ -302,19 +698,25 @@ document
                     "Registering employee..."
                 );
 
+
                 const tx =
-                    await contract.registerEmployee(
-                        companyId,
-                        employeeAddress
-                    );
+                    await contract
+                        .registerEmployee(
+                            companyId,
+                            employeeAddress
+                        );
+
 
                 await tx.wait();
+
 
                 setStatus(
                     "Employee registered successfully."
                 );
 
+
             } catch (error) {
+
                 console.error(error);
 
                 setStatus(
@@ -325,8 +727,15 @@ document
         }
     );
 
+
+// =====================================================
+// CREATE STREAM
+// =====================================================
+
 document
-    .getElementById("createStreamBtn")
+    .getElementById(
+        "createStreamBtn"
+    )
     .addEventListener(
         "click",
         async () => {
@@ -338,12 +747,14 @@ document
                     )
                     .value;
 
+
             const employeeAddress =
                 document
                     .getElementById(
                         "streamEmployeeInput"
                     )
                     .value;
+
 
             const duration =
                 document
@@ -352,6 +763,7 @@ document
                     )
                     .value;
 
+
             const deposit =
                 document
                     .getElementById(
@@ -359,17 +771,21 @@ document
                     )
                     .value;
 
+
             if (
                 !companyId ||
                 !employeeAddress ||
                 !duration ||
                 !deposit
             ) {
+
                 alert(
                     "Please fill all stream fields."
                 );
+
                 return;
             }
+
 
             try {
 
@@ -377,29 +793,38 @@ document
                     "Creating salary stream..."
                 );
 
+
                 const tx =
-                    await contract.createStream(
-                        companyId,
-                        employeeAddress,
-                        duration,
-                        {
-                            value:
-                                ethers.parseEther(
-                                    deposit
-                                )
-                        }
-                    );
+                    await contract
+                        .createStream(
+                            companyId,
+                            employeeAddress,
+                            duration,
+                            {
+                                value:
+                                    ethers
+                                        .parseEther(
+                                            deposit
+                                        )
+                            }
+                        );
+
 
                 await tx.wait();
+
 
                 setStatus(
                     "Stream created successfully."
                 );
 
-                await detectRole();
+
                 await loadStreams();
 
+                await detectRole();
+
+
             } catch (error) {
+
                 console.error(error);
 
                 setStatus(
@@ -410,8 +835,15 @@ document
         }
     );
 
+
+// =====================================================
+// CLAIM ADMIN FEES
+// =====================================================
+
 document
-    .getElementById("claimAdminFeesBtn")
+    .getElementById(
+        "claimAdminFeesBtn"
+    )
     .addEventListener(
         "click",
         async () => {
@@ -422,16 +854,22 @@ document
                     "Claiming admin fees..."
                 );
 
+
                 const tx =
-                    await contract.claimAdminFees();
+                    await contract
+                        .claimAdminFees();
+
 
                 await tx.wait();
+
 
                 setStatus(
                     "Admin fees claimed."
                 );
 
+
                 await updateAdminFees();
+
 
             } catch (error) {
 
@@ -445,7 +883,14 @@ document
         }
     );
 
-async function withdrawStream(streamId) {
+
+// =====================================================
+// EMPLOYEE WITHDRAW
+// =====================================================
+
+async function withdrawStream(
+    streamId
+) {
 
     try {
 
@@ -453,16 +898,24 @@ async function withdrawStream(streamId) {
             `Withdrawing from stream ${streamId}...`
         );
 
+
         const tx =
-            await contract.withdraw(streamId);
+            await contract
+                .withdraw(
+                    streamId
+                );
+
 
         await tx.wait();
+
 
         setStatus(
             `Withdrawal successful for stream ${streamId}.`
         );
 
+
         await loadStreams();
+
 
     } catch (error) {
 
@@ -475,7 +928,14 @@ async function withdrawStream(streamId) {
     }
 }
 
-async function cancelStream(streamId) {
+
+// =====================================================
+// CANCEL STREAM
+// =====================================================
+
+async function cancelStream(
+    streamId
+) {
 
     try {
 
@@ -483,24 +943,34 @@ async function cancelStream(streamId) {
             `Cancelling stream ${streamId}...`
         );
 
+
         const tx =
-            await contract.cancelStream(streamId);
+            await contract
+                .cancelStream(
+                    streamId
+                );
+
 
         await tx.wait();
+
 
         setStatus(
             `Stream ${streamId} cancelled.`
         );
 
+
         await loadStreams();
 
+
         if (
-            !adminSection.classList.contains(
-                "hidden"
-            )
+            !adminSection
+                .classList
+                .contains("hidden")
         ) {
+
             await updateAdminFees();
         }
+
 
     } catch (error) {
 
@@ -513,58 +983,145 @@ async function cancelStream(streamId) {
     }
 }
 
+
+// =====================================================
+// LOAD STREAMS FROM BLOCKCHAIN
+// =====================================================
+
 async function loadStreams() {
 
-    if (!contract || !currentAccount) {
+    if (
+        !contract ||
+        !currentAccount
+    ) {
+
         return;
     }
 
+
     const nextId =
-        Number(await contract.nextStreamId());
+        Number(
+            await contract
+                .nextStreamId()
+        );
+
+
+    streamCache.clear();
+
 
     let employerHTML = "";
+
     let employeeHTML = "";
 
-    for (let i = 0; i < nextId; i++) {
 
-        const stream =
+    const current =
+        currentAccount
+            .toLowerCase();
+
+
+    for (
+        let i = 0;
+        i < nextId;
+        i++
+    ) {
+
+        const result =
             await contract.streams(i);
 
+
+        const stream = {
+
+            id:
+                Number(
+                    result.id
+                ),
+
+            companyId:
+                Number(
+                    result.companyId
+                ),
+
+            employer:
+                result.employer,
+
+            employee:
+                result.employee,
+
+            totalDeposit:
+                result.totalDeposit,
+
+            startTime:
+                Number(
+                    result.startTime
+                ),
+
+            duration:
+                Number(
+                    result.duration
+                ),
+
+            totalWithdrawn:
+                result.totalWithdrawn,
+
+            active:
+                result.active
+        };
+
+
+        streamCache.set(
+            i,
+            stream
+        );
+
+
         const employer =
-            stream.employer.toLowerCase();
+            stream.employer
+                .toLowerCase();
+
 
         const employee =
-            stream.employee.toLowerCase();
+            stream.employee
+                .toLowerCase();
 
-        const current =
-            currentAccount.toLowerCase();
 
         const totalDeposit =
             ethers.formatEther(
                 stream.totalDeposit
             );
 
+
         const totalWithdrawn =
             ethers.formatEther(
                 stream.totalWithdrawn
             );
+
 
         const status =
             stream.active
                 ? "Active"
                 : "Closed";
 
-        if (employer === current) {
+
+        // =================================
+        // EMPLOYER VIEW
+        // =================================
+
+        if (
+            employer === current
+        ) {
 
             employerHTML += `
                 <div class="stream-card">
+
                     <div class="stream-title">
                         Stream #${i}
                     </div>
 
                     <p>
                         Employee:
-                        ${shortAddress(stream.employee)}
+                        ${shortAddress(
+                            stream.employee
+                        )}
                     </p>
 
                     <p>
@@ -584,11 +1141,13 @@ async function loadStreams() {
 
                     <p>
                         Status:
-                        <span class="${
-                            stream.active
-                            ? "active-text"
-                            : "closed-text"
-                        }">
+                        <span
+                            class="${
+                                stream.active
+                                    ? "active-text"
+                                    : "closed-text"
+                            }"
+                        >
                             ${status}
                         </span>
                     </p>
@@ -604,21 +1163,31 @@ async function loadStreams() {
 
                     ${
                         stream.active
+
                         ? `
-                        <button
-                            class="danger"
-                            onclick="window.cancelStream(${i})"
-                        >
-                            Cancel Stream
-                        </button>
+                            <button
+                                class="danger"
+                                onclick="window.cancelStream(${i})"
+                            >
+                                Cancel Stream
+                            </button>
                         `
+
                         : ""
                     }
+
                 </div>
             `;
         }
 
-        if (employee === current) {
+
+        // =================================
+        // EMPLOYEE VIEW
+        // =================================
+
+        if (
+            employee === current
+        ) {
 
             employeeHTML += `
                 <div class="stream-card">
@@ -629,7 +1198,9 @@ async function loadStreams() {
 
                     <p>
                         Employer:
-                        ${shortAddress(stream.employer)}
+                        ${shortAddress(
+                            stream.employer
+                        )}
                     </p>
 
                     <p>
@@ -649,11 +1220,13 @@ async function loadStreams() {
 
                     <p>
                         Status:
-                        <span class="${
-                            stream.active
-                            ? "active-text"
-                            : "closed-text"
-                        }">
+                        <span
+                            class="${
+                                stream.active
+                                    ? "active-text"
+                                    : "closed-text"
+                            }"
+                        >
                             ${status}
                         </span>
                     </p>
@@ -678,58 +1251,82 @@ async function loadStreams() {
 
                     ${
                         stream.active
-                        ? `
-                        <button
-                            class="success"
-                            onclick="window.withdrawStream(${i})"
-                        >
-                            Withdraw
-                        </button>
 
-                        <button
-                            class="danger"
-                            onclick="window.cancelStream(${i})"
-                        >
-                            Cancel Stream
-                        </button>
+                        ? `
+                            <button
+                                class="success"
+                                onclick="window.withdrawStream(${i})"
+                            >
+                                Withdraw
+                            </button>
+
+                            <button
+                                class="danger"
+                                onclick="window.cancelStream(${i})"
+                            >
+                                Cancel Stream
+                            </button>
                         `
+
                         : ""
                     }
+
                 </div>
             `;
         }
     }
 
+
     employerStreams.innerHTML =
         employerHTML ||
         "No outgoing streams found.";
+
 
     employeeStreams.innerHTML =
         employeeHTML ||
         "No incoming streams found.";
 
-    await updateLocalTickerValues();
+
+    updateLocalTickerValues();
 }
 
-async function updateLocalTickerValues() {
 
-    if (!contract || !currentAccount) {
+// =====================================================
+// LOCAL REAL-TIME TICKER
+// =====================================================
+//
+// No blockchain request occurs here.
+// State comes from streamCache.
+//
+// =====================================================
+
+function updateLocalTickerValues() {
+
+    if (
+        !currentAccount ||
+        streamCache.size === 0
+    ) {
+
         return;
     }
 
-    const nextId =
-        Number(await contract.nextStreamId());
 
     const now =
-        Math.floor(Date.now() / 1000);
+        Math.floor(
+            Date.now() / 1000
+        );
 
-    for (let i = 0; i < nextId; i++) {
 
-        const stream =
-            await contract.streams(i);
+    for (
+        const [i, stream]
+        of streamCache.entries()
+    ) {
 
         let unlocked;
 
+
+        // Closed stream:
+        // stop vesting immediately.
         if (!stream.active) {
 
             unlocked =
@@ -737,93 +1334,118 @@ async function updateLocalTickerValues() {
 
         } else {
 
-            const startTime =
-                Number(stream.startTime);
-
-            const duration =
-                Number(stream.duration);
-
-            const deposit =
-                stream.totalDeposit;
-
             const elapsed =
                 Math.max(
                     0,
-                    now - startTime
+                    now -
+                    stream.startTime
                 );
 
-            if (elapsed >= duration) {
+
+            if (
+                elapsed >=
+                stream.duration
+            ) {
 
                 unlocked =
-                    deposit;
+                    stream.totalDeposit;
 
             } else {
 
                 unlocked =
                     (
-                        deposit *
+                        stream.totalDeposit *
                         BigInt(elapsed)
                     )
                     /
-                    BigInt(duration);
+                    BigInt(
+                        stream.duration
+                    );
             }
         }
 
+
         let claimable = 0n;
+
 
         if (
             stream.active &&
             unlocked >
-                stream.totalWithdrawn
+            stream.totalWithdrawn
         ) {
+
             claimable =
                 unlocked -
                 stream.totalWithdrawn;
         }
 
+
         const unlockedText =
-            `${ethers.formatEther(unlocked)} ETH`;
+            `${ethers.formatEther(
+                unlocked
+            )} ETH`;
+
 
         const claimableText =
-            `${ethers.formatEther(claimable)} ETH`;
+            `${ethers.formatEther(
+                claimable
+            )} ETH`;
+
 
         const employerUnlocked =
             document.getElementById(
                 `employer-unlocked-${i}`
             );
 
+
         if (employerUnlocked) {
+
             employerUnlocked.textContent =
                 unlockedText;
         }
+
 
         const employeeUnlocked =
             document.getElementById(
                 `employee-unlocked-${i}`
             );
 
+
         if (employeeUnlocked) {
+
             employeeUnlocked.textContent =
                 unlockedText;
         }
+
 
         const employeeClaimable =
             document.getElementById(
                 `employee-claimable-${i}`
             );
 
+
         if (employeeClaimable) {
+
             employeeClaimable.textContent =
                 claimableText;
         }
     }
 }
 
+
+// =====================================================
+// START TICKER
+// =====================================================
+
 function startTicker() {
 
     if (tickerInterval) {
-        clearInterval(tickerInterval);
+
+        clearInterval(
+            tickerInterval
+        );
     }
+
 
     tickerInterval =
         setInterval(
@@ -832,45 +1454,305 @@ function startTicker() {
         );
 }
 
+
+// =====================================================
+// BONUS - LIVE EVENT AUTO SYNC
+// =====================================================
+
+async function startEventListeners() {
+
+    if (!contract) {
+
+        return;
+    }
+
+
+    // Clean listeners belonging to
+    // previous wallet connection.
+    if (eventContract) {
+
+        try {
+
+            await eventContract
+                .removeAllListeners();
+
+        } catch (error) {
+
+            console.log(
+                "Old event listener cleanup skipped."
+            );
+        }
+    }
+
+
+    eventContract =
+        contract;
+
+
+    // =================================
+    // STREAM CREATED
+    // =================================
+
+    contract.on(
+        "StreamCreated",
+        async (
+            streamId
+        ) => {
+
+            console.log(
+                "StreamCreated:",
+                streamId.toString()
+            );
+
+
+            setStatus(
+                `New stream ${streamId.toString()} detected automatically.`
+            );
+
+
+            await loadStreams();
+
+            await detectRole();
+        }
+    );
+
+
+    // =================================
+    // WITHDRAW
+    // =================================
+
+    contract.on(
+        "Withdrawn",
+        async (
+            streamId
+        ) => {
+
+            console.log(
+                "Withdrawn:",
+                streamId.toString()
+            );
+
+
+            setStatus(
+                `Stream ${streamId.toString()} withdrawal detected automatically.`
+            );
+
+
+            await loadStreams();
+
+
+            if (
+                !adminSection
+                    .classList
+                    .contains(
+                        "hidden"
+                    )
+            ) {
+
+                await updateAdminFees();
+            }
+        }
+    );
+
+
+    // =================================
+    // BONUS:
+    // STREAM CANCELLED
+    // =================================
+
+    contract.on(
+        "StreamCancelled",
+        async (
+            streamId
+        ) => {
+
+            console.log(
+                "StreamCancelled:",
+                streamId.toString()
+            );
+
+
+            setStatus(
+                `Stream ${streamId.toString()} was cancelled. UI auto-synced without page reload.`
+            );
+
+
+            // Refresh state once after
+            // receiving blockchain event.
+            await loadStreams();
+
+            await detectRole();
+
+
+            if (
+                !adminSection
+                    .classList
+                    .contains(
+                        "hidden"
+                    )
+            ) {
+
+                await updateAdminFees();
+            }
+        }
+    );
+
+
+    // =================================
+    // ADMIN FEES CLAIMED
+    // =================================
+
+    contract.on(
+        "AdminFeesClaimed",
+        async () => {
+
+            if (
+                !adminSection
+                    .classList
+                    .contains(
+                        "hidden"
+                    )
+            ) {
+
+                await updateAdminFees();
+            }
+        }
+    );
+}
+
+
+// =====================================================
+// EXPOSE FUNCTIONS TO HTML
+// =====================================================
+
 window.withdrawStream =
     withdrawStream;
+
 
 window.cancelStream =
     cancelStream;
 
-connectWalletBtn.addEventListener(
-    "click",
-    connectWallet
-);
 
-if (window.ethereum) {
+// =====================================================
+// CONNECT BUTTON
+// =====================================================
 
-    window.ethereum.on(
-        "accountsChanged",
+connectWalletBtn
+    .addEventListener(
+        "click",
         async () => {
+
+            await connectWallet(true);
+        }
+    );
+
+
+// =====================================================
+// METAMASK EVENTS
+// =====================================================
+
+// =====================================================
+// INITIALIZE METAMASK
+// =====================================================
+
+async function initializeMetaMask() {
+
+    setStatus(
+        "Detecting MetaMask..."
+    );
+
+    // Find the real MetaMask provider
+    // using EIP-6963
+    ethereum =
+        await discoverMetaMaskProvider();
+
+
+    if (!ethereum) {
+
+        setStatus(
+            "MetaMask not detected."
+        );
+
+        return;
+    }
+
+
+    // Expose for DevTools testing
+    window.streamPayEthereum =
+        ethereum;
+
+
+    console.log(
+        "MetaMask provider detected through EIP-6963"
+    );
+
+
+    // ---------------------------------
+    // ACCOUNT CHANGE
+    // ---------------------------------
+
+    ethereum.on(
+        "accountsChanged",
+        async (accounts) => {
+
+            if (
+                accounts.length === 0
+            ) {
+
+                currentAccount =
+                    null;
+
+                walletAddress.textContent =
+                    "Not connected";
+
+                networkStatus.textContent =
+                    "Not detected";
+
+                roleText.textContent =
+                    "Unknown";
+
+                setStatus(
+                    "MetaMask disconnected."
+                );
+
+                return;
+            }
+
 
             setStatus(
                 "MetaMask account changed."
             );
 
-            await connectWallet();
+
+            await connectWallet(false);
         }
     );
 
-    window.ethereum.on(
+
+    // ---------------------------------
+    // CHAIN CHANGE
+    // ---------------------------------
+
+    ethereum.on(
         "chainChanged",
-        () => {
-            window.location.reload();
+        async () => {
+
+            console.log(
+                "MetaMask network changed."
+            );
+
+            await connectWallet(false);
         }
     );
 
-    setStatus(
-        "MetaMask detected. Click Connect MetaMask."
-    );
 
-} else {
+    // ---------------------------------
+    // AUTO CONNECT
+    // ---------------------------------
 
-    setStatus(
-        "MetaMask not detected."
-    );
+    await autoConnectWallet();
 }
+
+
+// Start wallet initialization
+initializeMetaMask();
